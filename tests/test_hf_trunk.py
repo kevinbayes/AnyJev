@@ -2,7 +2,7 @@
 
 No checkpoint: the resolution tests are plain objects, and the loop test is a tiny fake decoder
 skipped when torch or transformers is absent. A real Gemma 4 parity run is `scripts/exit_parity.py`
-(or this file's engine test, when ANYJEV_GEMMA4_MODEL points at a local checkpoint).
+(or this file's engine test, when ANYJEV_ENGINE_MODEL points at a local checkpoint).
 """
 import os
 import subprocess
@@ -27,7 +27,7 @@ def _backend(model):
     return be
 
 
-def test_qwen_shaped_trunk_is_model_and_its_own_config():
+def test_trunk_on_model_is_used_with_its_own_config():
     inner = _Cfg(layers=[object()], embed_tokens=object())
     cfg = _Cfg(num_hidden_layers=28, hidden_size=1024, final_logit_softcapping=None)
     be = _backend(_Cfg(model=inner, config=cfg))
@@ -36,7 +36,7 @@ def test_qwen_shaped_trunk_is_model_and_its_own_config():
     assert be._logit_cap() is None
 
 
-def test_gemma4_shaped_trunk_is_language_model_and_text_config():
+def test_wrapped_trunk_is_language_model_and_text_config():
     lang = _Cfg(layers=[object()], embed_tokens=object())
     # the outer decoder wrapper has the towers, not the blocks
     wrapper = _Cfg(language_model=lang)
@@ -109,7 +109,6 @@ class _Trunk:
         self.rotary_emb = _RopePerType() if per_type else _RopeShared()
         self.hidden_size_per_layer_input = 4 if per_type else 0
         self.unique_layer_types = ["sliding_attention", "full_attention"]
-        self.layer_types_expected = ["sliding_attention", "full_attention"]
 
     def embed_tokens(self, ids):
         import torch
@@ -201,7 +200,7 @@ def test_per_type_loop_stops_early_and_passes_ple_and_sliding_mask(monkeypatch):
     assert any("inputs_embeds" in k for k in keys)
 
 
-def test_qwen_loop_keeps_past_key_value_and_cache_position(monkeypatch):
+def test_shared_rope_loop_keeps_past_key_value_and_cache_position(monkeypatch):
     _torch_loop()
     keys = []
     _install(monkeypatch, keys, "input_embeds")
@@ -219,7 +218,7 @@ def test_qwen_loop_keeps_past_key_value_and_cache_position(monkeypatch):
     assert not any("inputs_embeds" in k for k in keys)
 
 
-def test_qwen_loop_uses_the_5x_mask_spelling(monkeypatch):
+def test_shared_rope_loop_uses_the_5x_mask_spelling(monkeypatch):
     _torch_loop()
     keys = []
     _install(monkeypatch, keys, "inputs_embeds")
@@ -243,9 +242,9 @@ def test_embed_scale_on_the_trunk_still_refuses(monkeypatch):
 
 
 @pytest.mark.engine
-def test_gemma4_exit_parity_when_checkpoint_present():
-    model = os.environ.get("ANYJEV_GEMMA4_MODEL", "")
+def test_exit_parity_when_checkpoint_present():
+    model = os.environ.get("ANYJEV_ENGINE_MODEL", "")
     if not model or not os.path.isdir(model):
-        pytest.skip("set ANYJEV_GEMMA4_MODEL to a local Gemma 4 checkpoint")
+        pytest.skip("set ANYJEV_ENGINE_MODEL to a local Gemma 4 checkpoint")
     script = os.path.join(os.path.dirname(__file__), "..", "scripts", "exit_parity.py")
     subprocess.check_call([sys.executable, os.path.abspath(script), "--model", model, "--dtype", "float32"])
