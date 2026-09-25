@@ -248,7 +248,7 @@ class HFBackend:
         trunk = self._text_trunk()
         try:
             from transformers import DynamicCache
-            from transformers.masking_utils import create_causal_mask
+            from transformers.masking_utils import create_causal_mask  # noqa: F401  (the version check)
         except ImportError as e:   # older transformers
             raise NotImplementedError(str(e))
         ids, mask = enc["input_ids"], enc["attention_mask"]
@@ -263,14 +263,7 @@ class HFBackend:
         if self._rope_per_type(trunk):
             return self._prepare_per_type(trunk, ids, embeds, mask, pos, cache, cache_position)
         types = {getattr(layer, "attention_type", "full_attention") for layer in trunk.layers}
-        masks = {"full_attention": self._call_mask(
-            create_causal_mask, config=self.model.config, embeds=embeds, attention_mask=mask,
-            cache=cache, position_ids=pos, cache_position=cache_position)}
-        if "sliding_attention" in types:
-            from transformers.masking_utils import create_sliding_window_causal_mask
-            masks["sliding_attention"] = self._call_mask(
-                create_sliding_window_causal_mask, config=self.model.config, embeds=embeds,
-                attention_mask=mask, cache=cache, position_ids=pos, cache_position=cache_position)
+        masks = self._masks(self._text_config(), embeds, mask, cache, pos, cache_position, types)
         rope = trunk.rotary_emb(embeds, pos)
         return {"hidden": embeds, "masks": masks, "cache": cache, "cache_position": cache_position,
                 "position_ids": pos, "rope": rope, "trunk": trunk, "per_type": False}
@@ -287,11 +280,24 @@ class HFBackend:
         if getattr(trunk, "hidden_size_per_layer_input", 0):
             ple = trunk.project_per_layer_inputs(embeds, trunk.get_per_layer_inputs(ids, embeds))
         types = list(getattr(trunk, "unique_layer_types", None) or dict.fromkeys(layer_types))
-        masks = self._type_masks(text, embeds, mask, cache, pos, types)
+        masks = self._masks(text, embeds, mask, cache, pos, cache_position, types)
         rope = {t: trunk.rotary_emb(embeds, pos, t) for t in types}
+        # A UserDict, as the model's own forward builds it: FSDP2 rebuilds every plain dict it
+        # recurses into, and the KV states written by one layer would not reach the next.
         return {"hidden": embeds, "masks": masks, "cache": cache, "cache_position": cache_position,
                 "position_ids": pos, "rope": rope, "trunk": trunk, "per_type": True,
                 "ple": ple, "layer_types": layer_types, "shared_kv": UserDict()}
+
+    def _masks(self, config, embeds, attention_mask, cache, position_ids, cache_position, types):
+        """The full causal mask, and the sliding-window one when a layer type needs it."""
+        from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
+
+        kw = dict(config=config, embeds=embeds, attention_mask=attention_mask, cache=cache,
+                  position_ids=position_ids, cache_position=cache_position)
+        masks = {"full_attention": self._call_mask(create_causal_mask, **kw)}
+        if "sliding_attention" in types:
+            masks["sliding_attention"] = self._call_mask(create_sliding_window_causal_mask, **kw)
+        return masks
 
     @staticmethod
     def _call_mask(fn, *, config, embeds, attention_mask, cache, position_ids, cache_position):
@@ -303,37 +309,14 @@ class HFBackend:
         try:
             params = inspect.signature(fn).parameters
         except (TypeError, ValueError):
-            params = None
-        kw = {"config": config, "attention_mask": attention_mask, "past_key_values": cache,
-              "position_ids": position_ids}
-        if params is None:
-            kw["inputs_embeds"] = embeds
-            return fn(**kw)
-        names = set(params)
+            params = {}
         var = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
-        if "inputs_embeds" in names:
-            kw["inputs_embeds"] = embeds
-        elif "input_embeds" in names or var:
-            kw["input_embeds"] = embeds
-        else:
-            kw["inputs_embeds"] = embeds
-        if cache_position is not None and ("cache_position" in names or (var and "inputs_embeds" not in names)):
+        old = "inputs_embeds" not in params and ("input_embeds" in params or var)
+        kw = {"config": config, "attention_mask": attention_mask, "past_key_values": cache,
+              "position_ids": position_ids, "input_embeds" if old else "inputs_embeds": embeds}
+        if "cache_position" in params or (old and var):
             kw["cache_position"] = cache_position
         return fn(**kw)
-
-    @staticmethod
-    def _type_masks(text, embeds, mask, cache, pos, types):
-        from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
-
-        full = HFBackend._call_mask(
-            create_causal_mask, config=text, embeds=embeds, attention_mask=mask, cache=cache,
-            position_ids=pos, cache_position=None)
-        masks = {"full_attention": full}
-        if "sliding_attention" in types:
-            masks["sliding_attention"] = HFBackend._call_mask(
-                create_sliding_window_causal_mask, config=text, embeds=embeds, attention_mask=mask,
-                cache=cache, position_ids=pos, cache_position=None)
-        return masks
 
     def _run_layers(self, ctx, start: int, stop: int, capture=None):
         """Run blocks start..stop-1 (0-based) on ctx["hidden"], updating ctx["cache"]. `capture(i, h)`
@@ -342,7 +325,7 @@ class HFBackend:
         h = ctx["hidden"]
         for i in range(start, stop):
             layer = trunk.layers[i]
-            if ctx.get("per_type"):
+            if ctx["per_type"]:
                 kind = ctx["layer_types"][i]
                 ple = ctx["ple"]
                 ple_i = None if ple is None else ple[:, :, i, :]
