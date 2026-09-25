@@ -1,7 +1,7 @@
-"""HFBackend finds a Gemma 4 text trunk, and the block loop feeds it the kwargs that trunk expects.
+"""HFBackend finds a wrapped text trunk, and the block loop feeds it the kwargs that trunk expects.
 
 No checkpoint: the resolution tests are plain objects, and the loop test is a tiny fake decoder
-skipped when torch or transformers is absent. A real Gemma 4 parity run is `scripts/exit_parity.py`
+skipped when torch or transformers is absent. A real parity run is `scripts/exit_parity.py`
 (or this file's engine test, when ANYJEV_ENGINE_MODEL points at a local checkpoint).
 """
 import os
@@ -165,7 +165,7 @@ def _be(trunk, layer_types):
     import torch
     text = _Cfg(num_hidden_layers=2, hidden_size=8, final_logit_softcapping=None, layer_types=layer_types)
     wrapper = _Cfg(language_model=trunk) if layer_types else trunk
-    # Qwen shape: the trunk itself is .model and has layers. Gemma shape: wrapper has language_model.
+    # Plain shape: the trunk itself is .model and has layers. Wrapped shape: .model has language_model.
     if layer_types:
         model = _Cfg(model=wrapper, config=text, device=torch.device("cpu"))
     else:
@@ -245,6 +245,6 @@ def test_embed_scale_on_the_trunk_still_refuses(monkeypatch):
 def test_exit_parity_when_checkpoint_present():
     model = os.environ.get("ANYJEV_ENGINE_MODEL", "")
     if not model or not os.path.isdir(model):
-        pytest.skip("set ANYJEV_ENGINE_MODEL to a local Gemma 4 checkpoint")
+        pytest.skip("set ANYJEV_ENGINE_MODEL to a local checkpoint with a wrapped, per-type trunk")
     script = os.path.join(os.path.dirname(__file__), "..", "scripts", "exit_parity.py")
     subprocess.check_call([sys.executable, os.path.abspath(script), "--model", model, "--dtype", "float32"])
