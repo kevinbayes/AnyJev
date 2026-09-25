@@ -241,8 +241,8 @@ class HFBackend:
         cache and rotary embeddings. Mirrors the model's own forward so blocks can run one at a time.
         Qwen keeps one rope tensor and `attention_type` on the layer. A rotary module that takes
         `layer_type` (Gemma 4) also gets per-layer embeddings, a mask per layer type, and the shared
-        KV dict. Raises NotImplementedError when the trunk is missing or still carries `embed_scale`
-        on the decoder (older Gemma); the caller falls back to `output_hidden_states`."""
+        KV dict. Raises NotImplementedError when the trunk is missing or carries `embed_scale` on
+        the decoder; the caller falls back to `output_hidden_states`."""
         import torch
 
         trunk = self._text_trunk()
@@ -253,8 +253,7 @@ class HFBackend:
             raise NotImplementedError(str(e))
         ids, mask = enc["input_ids"], enc["attention_mask"]
         embeds = trunk.embed_tokens(ids)
-        # Older Gemma multiplies by a scale stored on the decoder. Gemma 4's scale lives inside
-        # the embedding module, so embed_tokens already applied it.
+        # Gemma 4 scales inside embed_tokens. A scale attribute on the decoder itself is not run here.
         if getattr(trunk, "embed_scale", None) is not None:
             raise NotImplementedError("scaled embeddings (Gemma) are not supported by the block loop yet")
         if not hasattr(trunk, "rotary_emb"):
