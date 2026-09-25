@@ -82,8 +82,19 @@ class _Layer:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, hidden, per_layer_input=None, **kwargs):
+    def forward(self, hidden, per_layer_input=None, shared_kv_states=None, **kwargs):
+        if shared_kv_states is not None:
+            kwargs["shared_kv_states"] = shared_kv_states
         self.calls.append((per_layer_input, kwargs))
+        return hidden
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+
+class _LayerOtherCall(_Layer):
+    def forward(self, hidden, position_embeddings=None, attention_mask=None, **kwargs):
+        self.calls.append((None, kwargs))
         return hidden
 
 
@@ -237,6 +248,17 @@ def test_embed_scale_on_the_trunk_still_refuses(monkeypatch):
     trunk.embed_scale = 1.0
     be = _be(trunk, ["sliding_attention", "full_attention"])
     with pytest.raises(NotImplementedError, match="scaled embeddings"):
+        be.hidden_states_to(["hello"], [1], max_layer=1)
+    assert trunk.layers[0].calls == []
+
+
+def test_per_type_rope_with_other_block_call_refuses(monkeypatch):
+    _torch_loop()
+    _install(monkeypatch, [], "inputs_embeds")
+    trunk = _Trunk(per_type=True)
+    trunk.layers = [_LayerOtherCall(), _LayerOtherCall()]
+    be = _be(trunk, ["sliding_attention", "full_attention"])
+    with pytest.raises(NotImplementedError, match="per_layer_input and shared_kv_states"):
         be.hidden_states_to(["hello"], [1], max_layer=1)
     assert trunk.layers[0].calls == []
 

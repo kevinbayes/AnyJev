@@ -63,6 +63,16 @@ class HFBackend:
             return False
         return "layer_type" in params
 
+    @staticmethod
+    def _layer_takes_per_type_inputs(trunk) -> bool:
+        """True when the decoder block takes the per-type call `_run_layers` makes: `per_layer_input`
+        as the argument after the hidden states, and `shared_kv_states`."""
+        try:
+            names = list(inspect.signature(trunk.layers[0].forward).parameters)
+        except (TypeError, ValueError, AttributeError, IndexError):
+            return False
+        return names[1:2] == ["per_layer_input"] and "shared_kv_states" in names
+
     def _last_logits(self, enc, pos):
         """Logits at the last position only. `logits_to_keep=1` skips the full-vocabulary
         projection for every earlier position (a 600-token prompt at batch 32 otherwise
@@ -243,8 +253,8 @@ class HFBackend:
         A shared rotary module gives one rope tensor, and each layer names its mask by
         `attention_type`. A rotary module that takes `layer_type` also gets per-layer embeddings,
         a mask per layer type, and the shared KV dict. Raises NotImplementedError when the trunk is
-        missing or carries `embed_scale` on the decoder; the caller falls back to
-        `output_hidden_states`."""
+        missing, carries `embed_scale` on the decoder, or has per-type rotary embeddings but blocks
+        that take other arguments; the caller falls back to `output_hidden_states`."""
         import torch
 
         trunk = self._text_trunk()
@@ -263,6 +273,9 @@ class HFBackend:
         cache = DynamicCache()
         cache_position = torch.arange(0, embeds.shape[1], device=embeds.device)
         if self._rope_per_type(trunk):
+            if not self._layer_takes_per_type_inputs(trunk):
+                raise NotImplementedError("per-type rotary embeddings, but the blocks do not take "
+                                          "per_layer_input and shared_kv_states")
             return self._prepare_per_type(trunk, ids, embeds, mask, pos, cache, cache_position)
         types = {getattr(layer, "attention_type", "full_attention") for layer in trunk.layers}
         masks = self._masks(self._text_config(), embeds, mask, cache, pos, cache_position, types)
