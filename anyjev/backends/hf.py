@@ -1,6 +1,7 @@
 """transformers backend: single forward per prompt batch, logits at the last position."""
 from __future__ import annotations
 
+import inspect
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -28,8 +29,38 @@ class HFBackend:
             model_name, torch_dtype=torch_dtype, device_map=device,
             trust_remote_code=trust_remote_code, revision=revision)
         self.model.eval()
-        self.n_layers = int(getattr(self.model.config, "num_hidden_layers", 0))
-        self.hidden_size = int(getattr(self.model.config, "hidden_size", 0))
+        text = self._text_config()
+        self.n_layers = int(getattr(text, "num_hidden_layers", 0))
+        self.hidden_size = int(getattr(text, "hidden_size", 0))
+
+    def _text_config(self):
+        """Depth, width and the logit cap. A multimodal wrapper keeps them on its text config."""
+        cfg = self.model.config
+        get = getattr(cfg, "get_text_config", None)
+        return get() if get is not None else cfg
+
+    def _text_trunk(self):
+        """The decoder stack. `.model` when it owns the blocks (Qwen); otherwise
+        `.model.language_model` (Gemma 4's multimodal wrapper)."""
+        inner = getattr(self.model, "model", None)
+        if inner is not None and hasattr(inner, "layers") and hasattr(inner, "embed_tokens"):
+            return inner
+        lang = getattr(inner, "language_model", None) if inner is not None else None
+        if lang is not None and hasattr(lang, "layers") and hasattr(lang, "embed_tokens"):
+            return lang
+        raise NotImplementedError("no .model.layers / .model.embed_tokens on this architecture")
+
+    def _logit_cap(self):
+        return getattr(self._text_config(), "final_logit_softcapping", None)
+
+    @staticmethod
+    def _rope_per_type(trunk) -> bool:
+        """Gemma 4's rotary module takes a layer type; Qwen's takes the hidden states and positions."""
+        try:
+            params = inspect.signature(trunk.rotary_emb.forward).parameters
+        except (TypeError, ValueError, AttributeError):
+            return False
+        return "layer_type" in params
 
     def _last_logits(self, enc, pos):
         """Logits at the last position only. `logits_to_keep=1` skips the full-vocabulary
@@ -48,7 +79,7 @@ class HFBackend:
         import torch
 
         logits = self.model.lm_head(hidden).float()
-        cap = getattr(self.model.config, "final_logit_softcapping", None)
+        cap = self._logit_cap()
         if cap:
             logits = cap * torch.tanh(logits / cap)
         return logits
@@ -157,10 +188,11 @@ class HFBackend:
         `anyjev.heads` are fit on."""
         import torch
 
-        n_blocks = int(self.model.config.num_hidden_layers)
+        text = self._text_config()
+        n_blocks = int(text.num_hidden_layers)
         layers = [n_blocks] if layers is None else [(n_blocks + 1 + i) if i < 0 else i for i in layers]
         n = len(prompts)
-        H = int(self.model.config.hidden_size)
+        H = int(text.hidden_size)
         lengths = [len(self.tokenizer.encode(p, add_special_tokens=False)) for p in prompts]
         order = sorted(range(n), key=lambda i: lengths[i])
         feats = np.zeros((n, len(layers), H), dtype=np.float32)
@@ -205,50 +237,123 @@ class HFBackend:
 
     # ---- depth: a block loop that can stop early, capture every block, and resume ----------
     def _prepare(self, enc, pos):
-        """Everything a transformers 4.5x decoder block needs besides the residual stream: the
-        embeddings, the causal mask(s), cache positions and rotary embeddings. Mirrors
-        `XModel.forward` so blocks can be run one at a time. Raises NotImplementedError for
-        architectures whose forward differs (the caller falls back to output_hidden_states)."""
+        """Everything a decoder block needs besides the residual stream: embeddings, causal mask(s),
+        cache and rotary embeddings. Mirrors the model's own forward so blocks can run one at a time.
+        Qwen keeps one rope tensor and `attention_type` on the layer. A rotary module that takes
+        `layer_type` (Gemma 4) also gets per-layer embeddings, a mask per layer type, and the shared
+        KV dict. Raises NotImplementedError when the trunk is missing or still carries `embed_scale`
+        on the decoder (older Gemma); the caller falls back to `output_hidden_states`."""
         import torch
 
-        inner = getattr(self.model, "model", None)
-        if inner is None or not hasattr(inner, "layers") or not hasattr(inner, "embed_tokens"):
-            raise NotImplementedError("no .model.layers / .model.embed_tokens on this architecture")
+        trunk = self._text_trunk()
         try:
             from transformers import DynamicCache
             from transformers.masking_utils import create_causal_mask
         except ImportError as e:   # older transformers
             raise NotImplementedError(str(e))
         ids, mask = enc["input_ids"], enc["attention_mask"]
-        embeds = inner.embed_tokens(ids)
+        embeds = trunk.embed_tokens(ids)
+        # Older Gemma multiplies by a scale stored on the decoder. Gemma 4's scale lives inside
+        # the embedding module, so embed_tokens already applied it.
+        if getattr(trunk, "embed_scale", None) is not None:
+            raise NotImplementedError("scaled embeddings (Gemma) are not supported by the block loop yet")
+        if not hasattr(trunk, "rotary_emb"):
+            raise NotImplementedError("no shared rotary embedding module on this architecture")
         cache = DynamicCache()
         cache_position = torch.arange(0, embeds.shape[1], device=embeds.device)
-        kw = dict(config=self.model.config, input_embeds=embeds, attention_mask=mask,
-                  cache_position=cache_position, past_key_values=cache, position_ids=pos)
-        masks = {"full_attention": create_causal_mask(**kw)}
-        types = {getattr(layer, "attention_type", "full_attention") for layer in inner.layers}
+        if self._rope_per_type(trunk):
+            return self._prepare_per_type(trunk, ids, embeds, mask, pos, cache, cache_position)
+        types = {getattr(layer, "attention_type", "full_attention") for layer in trunk.layers}
+        masks = {"full_attention": self._call_mask(
+            create_causal_mask, config=self.model.config, embeds=embeds, attention_mask=mask,
+            cache=cache, position_ids=pos, cache_position=cache_position)}
         if "sliding_attention" in types:
             from transformers.masking_utils import create_sliding_window_causal_mask
-            masks["sliding_attention"] = create_sliding_window_causal_mask(**kw)
-        if not hasattr(inner, "rotary_emb"):
-            raise NotImplementedError("no shared rotary embedding module on this architecture")
-        rope = inner.rotary_emb(embeds, pos)
-        scale = getattr(inner, "embed_scale", None)      # Gemma-style scaled embeddings
-        if scale is not None:
-            raise NotImplementedError("scaled embeddings (Gemma) are not supported by the block loop yet")
+            masks["sliding_attention"] = self._call_mask(
+                create_sliding_window_causal_mask, config=self.model.config, embeds=embeds,
+                attention_mask=mask, cache=cache, position_ids=pos, cache_position=cache_position)
+        rope = trunk.rotary_emb(embeds, pos)
         return {"hidden": embeds, "masks": masks, "cache": cache, "cache_position": cache_position,
-                "position_ids": pos, "rope": rope}
+                "position_ids": pos, "rope": rope, "trunk": trunk, "per_type": False}
+
+    def _prepare_per_type(self, trunk, ids, embeds, mask, pos, cache, cache_position):
+        """Gemma 4 text forward: per-layer embeddings, one rope pair per layer type, both masks."""
+        from collections import UserDict
+
+        text = self._text_config()
+        layer_types = list(getattr(text, "layer_types", None) or [])
+        if not layer_types:
+            raise NotImplementedError("per-type rotary embeddings without config.layer_types")
+        ple = None
+        if getattr(trunk, "hidden_size_per_layer_input", 0):
+            ple = trunk.project_per_layer_inputs(embeds, trunk.get_per_layer_inputs(ids, embeds))
+        types = list(getattr(trunk, "unique_layer_types", None) or dict.fromkeys(layer_types))
+        masks = self._type_masks(text, embeds, mask, cache, pos, types)
+        rope = {t: trunk.rotary_emb(embeds, pos, t) for t in types}
+        return {"hidden": embeds, "masks": masks, "cache": cache, "cache_position": cache_position,
+                "position_ids": pos, "rope": rope, "trunk": trunk, "per_type": True,
+                "ple": ple, "layer_types": layer_types, "shared_kv": UserDict()}
+
+    @staticmethod
+    def _call_mask(fn, *, config, embeds, attention_mask, cache, position_ids, cache_position):
+        """Call a masking helper with whichever embed / cache_position spelling it declares.
+
+        transformers 4.5x took `input_embeds` and `cache_position`. The 5.x helper takes
+        `inputs_embeds` and rejects `cache_position`. A `**kwargs` helper keeps the 4.5x call.
+        """
+        try:
+            params = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            params = None
+        kw = {"config": config, "attention_mask": attention_mask, "past_key_values": cache,
+              "position_ids": position_ids}
+        if params is None:
+            kw["inputs_embeds"] = embeds
+            return fn(**kw)
+        names = set(params)
+        var = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        if "inputs_embeds" in names:
+            kw["inputs_embeds"] = embeds
+        elif "input_embeds" in names or var:
+            kw["input_embeds"] = embeds
+        else:
+            kw["inputs_embeds"] = embeds
+        if cache_position is not None and ("cache_position" in names or (var and "inputs_embeds" not in names)):
+            kw["cache_position"] = cache_position
+        return fn(**kw)
+
+    @staticmethod
+    def _type_masks(text, embeds, mask, cache, pos, types):
+        from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
+
+        full = HFBackend._call_mask(
+            create_causal_mask, config=text, embeds=embeds, attention_mask=mask, cache=cache,
+            position_ids=pos, cache_position=None)
+        masks = {"full_attention": full}
+        if "sliding_attention" in types:
+            masks["sliding_attention"] = HFBackend._call_mask(
+                create_sliding_window_causal_mask, config=text, embeds=embeds, attention_mask=mask,
+                cache=cache, position_ids=pos, cache_position=None)
+        return masks
 
     def _run_layers(self, ctx, start: int, stop: int, capture=None):
         """Run blocks start..stop-1 (0-based) on ctx["hidden"], updating ctx["cache"]. `capture(i, h)`
         receives each block's output (1-based block index, matching the hidden-state tuple)."""
-        inner = self.model.model
+        trunk = ctx["trunk"]
         h = ctx["hidden"]
         for i in range(start, stop):
-            layer = inner.layers[i]
-            out = layer(h, attention_mask=ctx["masks"][getattr(layer, "attention_type", "full_attention")],
-                        position_ids=ctx["position_ids"], past_key_value=ctx["cache"],
-                        cache_position=ctx["cache_position"], position_embeddings=ctx["rope"])
+            layer = trunk.layers[i]
+            if ctx.get("per_type"):
+                kind = ctx["layer_types"][i]
+                ple = ctx["ple"]
+                ple_i = None if ple is None else ple[:, :, i, :]
+                out = layer(h, ple_i, shared_kv_states=ctx["shared_kv"],
+                            position_embeddings=ctx["rope"][kind], attention_mask=ctx["masks"][kind],
+                            position_ids=ctx["position_ids"], past_key_values=ctx["cache"])
+            else:
+                out = layer(h, attention_mask=ctx["masks"][getattr(layer, "attention_type", "full_attention")],
+                            position_ids=ctx["position_ids"], past_key_value=ctx["cache"],
+                            cache_position=ctx["cache_position"], position_embeddings=ctx["rope"])
             h = out[0] if isinstance(out, tuple) else out
             if capture is not None:
                 capture(i + 1, h)
@@ -284,7 +389,6 @@ class HFBackend:
             pos_feats = np.zeros((n, p_max, len(layers), H), dtype=np.float16)
         lens = np.zeros((n, len(layers), len(lens_ids)), dtype=np.float32) if lens_ids is not None else None
         lens_t = torch.as_tensor(list(lens_ids), device=self.model.device) if lens_ids is not None else None
-        inner = self.model.model
         for start in range(0, n, self.batch_size):
             idx = order[start:start + self.batch_size]
             enc = self.tokenizer([prompts[i] for i in idx], return_tensors="pt", padding=True, add_special_tokens=False)
@@ -300,12 +404,13 @@ class HFBackend:
 
             with torch.no_grad():
                 ctx = self._prepare(enc, pos)
+                trunk = ctx["trunk"]
 
                 if 0 in layers:
                     captured[0] = ctx["hidden"]
                 self._run_layers(ctx, 0, stop, capture=grab)
                 if n_blocks in layers or token_ids is not None:
-                    final = inner.norm(ctx["hidden"])
+                    final = trunk.norm(ctx["hidden"])
                     if n_blocks in layers and stop == n_blocks:
                         captured[n_blocks] = final
                     elif n_blocks in layers:
@@ -314,7 +419,7 @@ class HFBackend:
                     h = captured[layer]
                     feats[idx, li] = h[:, -1, :].float().cpu().numpy()
                     if lens_t is not None:
-                        hl = h[:, -1, :] if layer == n_blocks else inner.norm(h[:, -1, :])
+                        hl = h[:, -1, :] if layer == n_blocks else trunk.norm(h[:, -1, :])
                         lens[idx, li] = self._project(hl)[:, lens_t].float().cpu().numpy()
                     if positions is not None:
                         for row, i in enumerate(idx):
