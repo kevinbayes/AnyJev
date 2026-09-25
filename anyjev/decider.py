@@ -288,9 +288,10 @@ class Decider:
         listing order (or `perms[i]` for state i). Through the block loop when the backend has
         one (the forward stops at the deepest requested block), else through a full forward.
         A block loop that raises NotImplementedError (transformers without `masking_utils`,
-        i.e. < 4.53, or an architecture it does not cover, e.g. Gemma's scaled embeddings)
-        falls back to the full forward: the same layers, the same head, only the early stop
-        is lost; `early_stop_error` records why and L2 diagnostics report early_stop=False."""
+        i.e. < 4.53, or a trunk the loop does not run) falls back to the full forward: the same
+        layers, the same head, only the early stop is lost; `early_stop_error` records why and L2
+        diagnostics report early_stop=False. Trunks with per-type rotary embeddings,
+        per-layer inputs and shared KV take the early-stop path."""
         labels, _ = self._labels_for(q)
         tok = self.backend.tokenizer
         prompts = []
