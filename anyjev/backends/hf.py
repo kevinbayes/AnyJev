@@ -29,9 +29,9 @@ class HFBackend:
             model_name, torch_dtype=torch_dtype, device_map=device,
             trust_remote_code=trust_remote_code, revision=revision)
         self.model.eval()
-        text = self._text_config()
-        self.n_layers = int(getattr(text, "num_hidden_layers", 0))
-        self.hidden_size = int(getattr(text, "hidden_size", 0))
+        cfg = self._text_config()
+        self.n_layers = int(getattr(cfg, "num_hidden_layers", 0))
+        self.hidden_size = int(getattr(cfg, "hidden_size", 0))
 
     def _text_config(self):
         """Depth, width and the logit cap. A multimodal wrapper keeps them on its text config."""
@@ -40,8 +40,8 @@ class HFBackend:
         return get() if get is not None else cfg
 
     def _text_trunk(self):
-        """The decoder stack. `.model` when it owns the blocks (Qwen); otherwise
-        `.model.language_model` (Gemma 4's multimodal wrapper)."""
+        """The decoder stack: `.model` when it owns the blocks, otherwise `.model.language_model`
+        (a multimodal wrapper that holds the text decoder beside its other towers)."""
         inner = getattr(self.model, "model", None)
         if inner is not None and hasattr(inner, "layers") and hasattr(inner, "embed_tokens"):
             return inner
@@ -55,7 +55,8 @@ class HFBackend:
 
     @staticmethod
     def _rope_per_type(trunk) -> bool:
-        """Gemma 4's rotary module takes a layer type; Qwen's takes the hidden states and positions."""
+        """True when the rotary module takes a `layer_type` (one rope pair per attention type), not
+        just the hidden states and positions."""
         try:
             params = inspect.signature(trunk.rotary_emb.forward).parameters
         except (TypeError, ValueError, AttributeError):
@@ -188,11 +189,11 @@ class HFBackend:
         `anyjev.heads` are fit on."""
         import torch
 
-        text = self._text_config()
-        n_blocks = int(text.num_hidden_layers)
+        cfg = self._text_config()
+        n_blocks = int(cfg.num_hidden_layers)
         layers = [n_blocks] if layers is None else [(n_blocks + 1 + i) if i < 0 else i for i in layers]
         n = len(prompts)
-        H = int(text.hidden_size)
+        H = int(cfg.hidden_size)
         lengths = [len(self.tokenizer.encode(p, add_special_tokens=False)) for p in prompts]
         order = sorted(range(n), key=lambda i: lengths[i])
         feats = np.zeros((n, len(layers), H), dtype=np.float32)
@@ -239,10 +240,11 @@ class HFBackend:
     def _prepare(self, enc, pos):
         """Everything a decoder block needs besides the residual stream: embeddings, causal mask(s),
         cache and rotary embeddings. Mirrors the model's own forward so blocks can run one at a time.
-        Qwen keeps one rope tensor and `attention_type` on the layer. A rotary module that takes
-        `layer_type` (Gemma 4) also gets per-layer embeddings, a mask per layer type, and the shared
-        KV dict. Raises NotImplementedError when the trunk is missing or carries `embed_scale` on
-        the decoder; the caller falls back to `output_hidden_states`."""
+        A shared rotary module gives one rope tensor, and each layer names its mask by
+        `attention_type`. A rotary module that takes `layer_type` also gets per-layer embeddings,
+        a mask per layer type, and the shared KV dict. Raises NotImplementedError when the trunk is
+        missing or carries `embed_scale` on the decoder; the caller falls back to
+        `output_hidden_states`."""
         import torch
 
         trunk = self._text_trunk()
@@ -253,7 +255,7 @@ class HFBackend:
             raise NotImplementedError(str(e))
         ids, mask = enc["input_ids"], enc["attention_mask"]
         embeds = trunk.embed_tokens(ids)
-        # Gemma 4 scales inside embed_tokens. A scale attribute on the decoder itself is not run here.
+        # Scaling inside embed_tokens is covered. A scale attribute on the decoder itself is not run here.
         if getattr(trunk, "embed_scale", None) is not None:
             raise NotImplementedError("scaled embeddings (Gemma) are not supported by the block loop yet")
         if not hasattr(trunk, "rotary_emb"):
@@ -269,18 +271,18 @@ class HFBackend:
                 "position_ids": pos, "rope": rope, "trunk": trunk, "per_type": False}
 
     def _prepare_per_type(self, trunk, ids, embeds, mask, pos, cache, cache_position):
-        """Gemma 4 text forward: per-layer embeddings, one rope pair per layer type, both masks."""
+        """Per-type trunk: per-layer embeddings, one rope pair per layer type, both masks."""
         from collections import UserDict
 
-        text = self._text_config()
-        layer_types = list(getattr(text, "layer_types", None) or [])
+        cfg = self._text_config()
+        layer_types = list(getattr(cfg, "layer_types", None) or [])
         if not layer_types:
             raise NotImplementedError("per-type rotary embeddings without config.layer_types")
         ple = None
         if getattr(trunk, "hidden_size_per_layer_input", 0):
             ple = trunk.project_per_layer_inputs(embeds, trunk.get_per_layer_inputs(ids, embeds))
         types = list(getattr(trunk, "unique_layer_types", None) or dict.fromkeys(layer_types))
-        masks = self._masks(text, embeds, mask, cache, pos, cache_position, types)
+        masks = self._masks(cfg, embeds, mask, cache, pos, cache_position, types)
         rope = {t: trunk.rotary_emb(embeds, pos, t) for t in types}
         # A UserDict, as the model's own forward builds it: FSDP2 rebuilds every plain dict it
         # recurses into, and the KV states written by one layer would not reach the next.

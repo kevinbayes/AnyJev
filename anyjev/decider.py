@@ -290,7 +290,8 @@ class Decider:
         A block loop that raises NotImplementedError (transformers without `masking_utils`,
         i.e. < 4.53, or a trunk the loop does not run) falls back to the full forward: the same
         layers, the same head, only the early stop is lost; `early_stop_error` records why and L2
-        diagnostics report early_stop=False. Gemma 4 text trunks take the early-stop path."""
+        diagnostics report early_stop=False. Trunks with per-type rotary embeddings,
+        per-layer inputs and shared KV take the early-stop path."""
         labels, _ = self._labels_for(q)
         tok = self.backend.tokenizer
         prompts = []
