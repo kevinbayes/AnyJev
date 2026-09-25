@@ -288,10 +288,9 @@ class Decider:
         listing order (or `perms[i]` for state i). Through the block loop when the backend has
         one (the forward stops at the deepest requested block), else through a full forward.
         A block loop that raises NotImplementedError (transformers without `masking_utils`,
-        i.e. < 4.53, or a trunk the loop does not run, including a decoder that still exposes
-        `embed_scale`) falls back to the full forward: the same layers, the same head, only the
-        early stop is lost; `early_stop_error` records why and L2 diagnostics report
-        early_stop=False. A Gemma 4 text trunk takes the early-stop path."""
+        i.e. < 4.53, or a trunk the loop does not run) falls back to the full forward: the same
+        layers, the same head, only the early stop is lost; `early_stop_error` records why and L2
+        diagnostics report early_stop=False. Gemma 4 text trunks take the early-stop path."""
         labels, _ = self._labels_for(q)
         tok = self.backend.tokenizer
         prompts = []
