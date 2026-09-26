@@ -73,7 +73,7 @@ def latency_at(root: str, model: str, blocks: int, state_tokens: int = 110) -> O
     near = min(trunc, key=lambda r: abs(r["blocks"] - blocks))
     return {"path": paths[-1], "measured_blocks": near["blocks"], "batch_ms": near["batch_ms"],
             "single_ms": near["single_ms"], "raw_batch_ms": raw["batch_ms"], "raw_single_ms": raw["single_ms"],
-            "gflops": near["gflops"], "raw_gflops": raw["gflops"]}
+            "gflops": near["gflops"], "raw_gflops": raw["gflops"], "gpu": d.get("env", {}).get("gpu")}
 
 
 def main(argv=None):
@@ -192,7 +192,8 @@ def main(argv=None):
               f"({100 * rec_block / args.n_layers:.0f}% depth; within {args.slack} of the best out-of-fold accuracy)"]
     lat = result["latency"]
     if lat:
-        lines.append(f"cost at block {lat['measured_blocks']} (110-token states, one H100): "
+        gpu = lat.get("gpu") or "unspecified GPU"
+        lines.append(f"cost at block {lat['measured_blocks']} (110-token states, {gpu}): "
                      f"{lat['batch_ms']:.1f} ms per decision batched "
                      f"({lat['batch_ms'] / lat['raw_batch_ms']:.2f}x raw), "
                      f"{lat['single_ms']:.1f} ms single ({lat['single_ms'] / lat['raw_single_ms']:.2f}x raw), "

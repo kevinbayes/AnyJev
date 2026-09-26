@@ -38,8 +38,8 @@ def timed(fn, repeat: int = 1):
     return (time.perf_counter() - t0) / repeat
 
 
-def block_params(model) -> int:
-    layer = model.model.layers[0]
+def block_params(be) -> int:
+    layer = be._text_trunk().layers[0]  # resolves the wrapped trunk (e.g. Gemma 4's language_model)
     return int(sum(p.numel() for p in layer.parameters()))
 
 
@@ -58,7 +58,7 @@ def main(argv=None):
 
     be = HFBackend(args.model, batch_size=args.batch_size)
     L = be.n_layers
-    pb = block_params(be.model)
+    pb = block_params(be)
     q = Question.choice("Which team should handle this?", [f"team {i}" for i in range(args.k)])
     labels, ids = resolve_labels(be.tokenizer, q)
     perm = list(range(args.k))

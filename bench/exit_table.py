@@ -108,9 +108,31 @@ def depth_tables(root: str, models: List[str]) -> List[str]:
     return out
 
 
+def hardware_note(root: str, models: List[str]) -> str:
+    """The hardware / batch note for the latency section, read from each latency JSON's `env`
+    (never hard-coded: mixing hardware in one table would otherwise go unrecorded)."""
+    gpus: List[str] = []
+    batches: List[int] = []
+    for m in models:
+        env = (load(root, m, "latency") or {}).get("env", {})
+        if env.get("gpu"):
+            gpus.append(env["gpu"])
+        if env.get("batch_size"):
+            batches.append(int(env["batch_size"]))
+    hw = ", ".join(dict.fromkeys(gpus)) or "unspecified hardware"
+    bs = sorted(set(batches))
+    if len(bs) == 1:
+        batched = f"batched = {bs[0]} prompts per forward"
+    elif bs:
+        batched = f"batched = {bs[0]}-{bs[-1]} prompts per forward (varies by model)"
+    else:
+        batched = "batched = multiple prompts per forward"
+    return f"{hw}, bf16, never-seen states; {batched}, single = one"
+
+
 def latency_tables(root: str, models: List[str]) -> List[str]:
     out = ["## Milliseconds per decision by depth", "",
-           "One H100 NVL, bf16, never-seen states; batched = 32 prompts per forward (16 for the 32B), single = one",
+           hardware_note(root, models),
            "prompt; the raw row is the model's plain forward (`next_token_logprobs`), the others the truncated block",
            "loop (`hidden_states_to(max_layer=)`). GFLOPs = 2 x parameters per block x prompt tokens x blocks.", ""]
     for m in models:
