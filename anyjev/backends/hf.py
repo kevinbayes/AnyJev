@@ -478,7 +478,8 @@ class HFBackend:
                     feats[idx, li] = h[:, -1, :].float().cpu().numpy()
                     if lens_t is not None:
                         hl = h[:, -1, :] if layer == n_blocks else trunk.norm(h[:, -1, :])
-                        lens[idx, li] = self._project(hl)[:, lens_t].float().cpu().numpy()
+                        proj = self._project(hl)  # on the lm_head's device, a later shard under device_map="auto"
+                        lens[idx, li] = proj[:, lens_t.to(proj.device)].float().cpu().numpy()
                     if positions is not None:
                         for row, i in enumerate(idx):
                             if not positions[i]:
