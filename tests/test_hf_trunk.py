@@ -263,6 +263,70 @@ def test_per_type_rope_with_other_block_call_refuses(monkeypatch):
     assert trunk.layers[0].calls == []
 
 
+def test_project_applies_output_multiplier_before_the_cap():
+    torch = _torch_loop()
+    x = torch.tensor([[-80.0, -3.0, 0.0, 2.5, 150.0]])
+    T, m = 20.0, 0.25
+    for mult, expected in ((m, T * torch.tanh(x * m / T)), (None, T * torch.tanh(x / T))):
+        text = _Cfg(final_logit_softcapping=T, output_multiplier=mult)
+        be = _backend(_Cfg(config=text, lm_head=lambda h: h))
+        assert torch.allclose(be._project(x), expected, atol=1e-6)
+
+
+def test_shared_rope_loop_reads_layer_types_and_skips_rope_on_nope_blocks(monkeypatch):
+    _torch_loop()
+    keys = []
+    _install(monkeypatch, keys, "inputs_embeds")
+    trunk = _Trunk(per_type=False)
+    be = _be(trunk, None)
+    # blocks without `attention_type`: the type and the rope switch live on the config
+    be.model.config.layer_types = ["sliding_attention", "full_attention"]
+    be.model.config.layer_rope_theta = [500000.0, 0]
+    be.hidden_states_to(["hello"], [2], max_layer=2)
+    (_, kw0), = trunk.layers[0].calls
+    (_, kw1), = trunk.layers[1].calls
+    assert kw0["attention_mask"] == "SLIDE" and kw0["position_embeddings"] == ("rope", "one")
+    assert kw1["attention_mask"] == "FULL" and kw1["position_embeddings"] is None
+
+
+def test_load_model_falls_back_to_image_text_to_text(monkeypatch):
+    pytest.importorskip("transformers")
+    import transformers
+
+    seen = []
+
+    class Causal:
+        @staticmethod
+        def from_pretrained(name, **kw):
+            seen.append("causal")
+            raise ValueError("Unrecognized configuration class <X> for this kind of AutoModel: AutoModelForCausalLM.")
+
+    class ImageText:
+        @staticmethod
+        def from_pretrained(name, **kw):
+            seen.append(("image_text", kw))
+            return "MODEL"
+
+    monkeypatch.setattr(transformers, "AutoModelForCausalLM", Causal)
+    monkeypatch.setattr(transformers, "AutoModelForImageTextToText", ImageText, raising=False)
+    assert HFBackend._load_model("m", device_map="cpu") == "MODEL"
+    assert seen == ["causal", ("image_text", {"device_map": "cpu"})]
+
+
+def test_load_model_does_not_mask_other_errors(monkeypatch):
+    pytest.importorskip("transformers")
+    import transformers
+
+    class Causal:
+        @staticmethod
+        def from_pretrained(name, **kw):
+            raise ValueError("something else")
+
+    monkeypatch.setattr(transformers, "AutoModelForCausalLM", Causal)
+    with pytest.raises(ValueError, match="something else"):
+        HFBackend._load_model("m")
+
+
 @pytest.mark.engine
 def test_exit_parity_when_checkpoint_present():
     model = os.environ.get("ANYJEV_ENGINE_MODEL", "")

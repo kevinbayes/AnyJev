@@ -13,6 +13,8 @@ rename is listed in docs/migration_v3.md).
         --layers 14,16,18,20,22,24,26,28,30,32,34,36,38,40,42
     python -m bench.extract_pools --model google/gemma-4-31B-it --layers 16,20,24,28,32,36,40,44,48,52,56,60
     python -m bench.extract_pools --model google/gemma-4-26B-A4B-it --batch-size 8 --layers 8,12,16,20,24,28,30
+    python -m bench.extract_pools --model meta-models/Muse-Glimmer-30B --device auto --batch-size 8 \
+        --layers 16,20,24,28,32,36,40,44,48,51   # transformers>=5.17; candidate list, no run yet
 
 For every typed-decisions question (300 train / 100 test decisions) four pools are written to
 <out>/features/<model>/typed.<workflow>.<qname>.{train.rand,test.id,test.rev,train.id}.<which>.npz

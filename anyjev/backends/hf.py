@@ -12,9 +12,10 @@ class HFBackend:
                  batch_size: int = 16, trust_remote_code: bool = False, revision: Optional[str] = None,
                  **model_kwargs):
         """`model_kwargs` go to `from_pretrained` unchanged. Pass `device_map=` there to shard a
-        model across devices; `device` alone is a placement and does not need one."""
+        model across devices (`device="auto"` is shorthand for `device_map="auto"`); any other
+        `device` is a placement and does not need one."""
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoTokenizer
 
         self.name = model_name
         self.batch_size = batch_size
@@ -39,11 +40,14 @@ class HFBackend:
         # not install, so the backend could not be built on a clean machine for any device -- and
         # on Apple Silicon the device_map materialisation path segfaults outright. Both reported
         # by @lws2004 in issue #5. Real sharding stays available as `device_map=` in model_kwargs,
-        # and when it is given the placement is left to transformers.
+        # and when it is given the placement is left to transformers. `device="auto"` (the bench
+        # scripts' `--device auto`, e.g. a 31B across GPUs) is that sharding request.
         kw = dict(model_kwargs)
         kw.setdefault(dtype_kw, torch_dtype)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, trust_remote_code=trust_remote_code, revision=revision, **kw)
+        if device == "auto":
+            kw.setdefault("device_map", "auto")
+        self.model = self._load_model(model_name, trust_remote_code=trust_remote_code,
+                                      revision=revision, **kw)
         if "device_map" not in kw:
             self.model = self.model.to(device)
         self.model.eval()
@@ -54,6 +58,24 @@ class HFBackend:
         cfg = self._text_config()
         self.n_layers = int(getattr(cfg, "num_hidden_layers", 0))
         self.hidden_size = int(getattr(cfg, "hidden_size", 0))
+
+    @staticmethod
+    def _load_model(model_name: str, **kwargs):
+        """The CausalLM auto class, or the image-text-to-text one for a multimodal checkpoint that
+        transformers registers only there (its text decoder and lm_head are the same shape; the
+        vision tower is loaded and never run on text prompts)."""
+        from transformers import AutoModelForCausalLM
+
+        try:
+            return AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
+        except ValueError as causal_error:
+            if "Unrecognized configuration class" not in str(causal_error):
+                raise
+            try:
+                from transformers import AutoModelForImageTextToText
+            except ImportError:
+                raise causal_error
+            return AutoModelForImageTextToText.from_pretrained(model_name, **kwargs)
 
     def _text_config(self):
         """Depth, width and the logit cap. A multimodal wrapper keeps them on its text config."""
@@ -76,6 +98,25 @@ class HFBackend:
 
     def _logit_cap(self):
         return getattr(self._text_config(), "final_logit_softcapping", None)
+
+    def _output_multiplier(self):
+        """A scale some checkpoints apply to the lm_head output before the softcap."""
+        return getattr(self._text_config(), "output_multiplier", None)
+
+    def _layer_type(self, trunk, i: int) -> str:
+        """Attention type of block i: the block's own `attention_type`, else `config.layer_types[i]`
+        (trunks whose blocks do not carry it), else full attention."""
+        kind = getattr(trunk.layers[i], "attention_type", None)
+        if kind is not None:
+            return kind
+        types = getattr(self._text_config(), "layer_types", None) or []
+        return types[i] if i < len(types) else "full_attention"
+
+    def _nope(self, i: int) -> bool:
+        """True for a block without rotary position embeddings (`layer_rope_theta[i] == 0`); the
+        model's forward passes it `position_embeddings=None`."""
+        thetas = getattr(self._text_config(), "layer_rope_theta", None)
+        return thetas is not None and i < len(thetas) and not thetas[i]
 
     @staticmethod
     def _rope_per_type(trunk) -> bool:
@@ -110,10 +151,14 @@ class HFBackend:
     # ---- optional fast path: one prefix forward per state, K short suffixes ----
     def _project(self, hidden):
         """Final logits for a [N, H] batch of last-position hidden states, matching
-        what the CausalLM forward would return (including Gemma-style softcapping)."""
+        what the CausalLM forward would return: the output multiplier when the config has one, then
+        Gemma-style softcapping."""
         import torch
 
         logits = self.model.lm_head(hidden).float()
+        mult = self._output_multiplier()
+        if mult is not None:
+            logits = logits * mult
         cap = self._logit_cap()
         if cap:
             logits = cap * torch.tanh(logits / cap)
@@ -277,11 +322,12 @@ class HFBackend:
     def _prepare(self, enc, pos):
         """Everything a decoder block needs besides the residual stream: embeddings, causal mask(s),
         cache and rotary embeddings. Mirrors the model's own forward so blocks can run one at a time.
-        A shared rotary module gives one rope tensor, and each layer names its mask by
-        `attention_type`. A rotary module that takes `layer_type` also gets per-layer embeddings,
-        a mask per layer type, and the shared KV dict. Raises NotImplementedError when the trunk is
-        missing, carries `embed_scale` on the decoder, or has per-type rotary embeddings but blocks
-        that take other arguments; the caller falls back to `output_hidden_states`."""
+        A shared rotary module gives one rope tensor (withheld from NoPE blocks), and each layer's
+        mask is chosen by its attention type (`_layer_type`). A rotary module that takes
+        `layer_type` also gets per-layer embeddings, a mask per layer type, and the shared KV dict.
+        Raises NotImplementedError when the trunk is missing, carries `embed_scale` on the decoder,
+        or has per-type rotary embeddings but blocks that take other arguments; the caller falls
+        back to `output_hidden_states`."""
         import torch
 
         trunk = self._text_trunk()
@@ -314,7 +360,7 @@ class HFBackend:
                                           "per_layer_input and shared_kv_states")
             return self._prepare_per_type(trunk, ids, embeds, pos, cache, cache_position, kw)
         masks = {"full_attention": create_causal_mask(**kw)}
-        types = {getattr(layer, "attention_type", "full_attention") for layer in trunk.layers}
+        types = {self._layer_type(trunk, i) for i in range(len(trunk.layers))}
         if "sliding_attention" in types:
             from transformers.masking_utils import create_sliding_window_causal_mask
             masks["sliding_attention"] = create_sliding_window_causal_mask(**kw)
@@ -362,9 +408,10 @@ class HFBackend:
                             position_embeddings=ctx["rope"][kind], attention_mask=ctx["masks"][kind],
                             position_ids=ctx["position_ids"], past_key_values=ctx["cache"])
             else:
-                out = layer(h, attention_mask=ctx["masks"][getattr(layer, "attention_type", "full_attention")],
+                out = layer(h, attention_mask=ctx["masks"][self._layer_type(trunk, i)],
                             position_ids=ctx["position_ids"], past_key_value=ctx["cache"],
-                            cache_position=ctx["cache_position"], position_embeddings=ctx["rope"])
+                            cache_position=ctx["cache_position"],
+                            position_embeddings=None if self._nope(i) else ctx["rope"])
             h = out[0] if isinstance(out, tuple) else out
             if capture is not None:
                 capture(i + 1, h)
