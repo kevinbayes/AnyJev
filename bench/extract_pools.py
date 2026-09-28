@@ -46,6 +46,8 @@ def main(argv=None):
     ap.add_argument("--n-calib", type=int, default=300)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--batch-size", type=int, default=16)
+    ap.add_argument("--device", default="cuda",
+                    help="'cuda' (single GPU), 'auto' (shard across visible GPUs, e.g. a 31B), or 'cpu'")
     ap.add_argument("--plain-forward", dest="use_loop", action="store_false", default=True,
                     help="one full forward with output_hidden_states instead of the block loop (no logit lens)")
     args = ap.parse_args(argv)
@@ -55,7 +57,7 @@ def main(argv=None):
     def backend_factory():
         if "backend" not in holder:
             from anyjev.backends.hf import HFBackend
-            holder["backend"] = HFBackend(args.model, batch_size=args.batch_size)
+            holder["backend"] = HFBackend(args.model, device=args.device, batch_size=args.batch_size)
         return holder["backend"]
 
     records = typed_records(args.calib_cases)

@@ -437,7 +437,7 @@ class HFBackend:
                             if not positions[i]:
                                 continue
                             cols = torch.as_tensor([T_pad - int(n_tok[row]) + int(p) for p in positions[i]],
-                                                   device=self.model.device)
+                                                   device=h.device)  # h may be on a later shard under device_map="auto"
                             pos_feats[i, :len(positions[i]), li] = h[row, cols, :].to(torch.float16).cpu().numpy()
                 if token_ids is not None:
                     lp = torch.log_softmax(self._project(final[:, -1, :]), dim=-1)
