@@ -58,10 +58,12 @@ def main(argv=None):
     ap.add_argument("--out", default="anyjev-heads")
     ap.add_argument("--cache", default="bench/results_exit", help="study cache root for the agreement check")
     ap.add_argument("--which", default="last")
+    ap.add_argument("--device", default="cuda",
+                    help="'cuda' (single GPU), 'auto' (shard across visible GPUs, e.g. a 31B), or 'cpu'")
     args = ap.parse_args(argv)
     from anyjev.backends.hf import HFBackend
 
-    be = HFBackend(args.model, batch_size=args.batch_size)
+    be = HFBackend(args.model, device=args.device, batch_size=args.batch_size)
     L = be.n_layers
     if args.layers:
         candidates = sorted({int(x) for x in args.layers.split(",")})
