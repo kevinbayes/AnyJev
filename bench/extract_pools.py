@@ -8,6 +8,13 @@ rename is listed in docs/migration_v3.md).
     python -m bench.extract_pools --model Qwen/Qwen3-32B  --layers 16,20,24,28,32,36,40,44,48,52,56,60,64
     python -m bench.extract_pools --model Qwen/Qwen3-30B-A3B-Instruct-2507 --batch-size 8 \
         --layers 12,16,20,24,28,32,36,40,44,48
+    python -m bench.extract_pools --model google/gemma-4-E2B-it --layers 10,12,14,16,18,20,22,24,26,28,30,32,34,35
+    python -m bench.extract_pools --model google/gemma-4-E4B-it \
+        --layers 14,16,18,20,22,24,26,28,30,32,34,36,38,40,42
+    python -m bench.extract_pools --model google/gemma-4-31B-it --layers 16,20,24,28,32,36,40,44,48,52,56,60
+    python -m bench.extract_pools --model google/gemma-4-26B-A4B-it --batch-size 8 --layers 8,12,16,20,24,28,30
+    python -m bench.extract_pools --model meta-models/Muse-Glimmer-30B --device auto --batch-size 8 \
+        --layers 16,20,24,28,32,36,40,44,48,51   # transformers>=5.17; candidate list, no run yet
 
 For every typed-decisions question (300 train / 100 test decisions) four pools are written to
 <out>/features/<model>/typed.<workflow>.<qname>.{train.rand,test.id,test.rev,train.id}.<which>.npz
@@ -41,6 +48,8 @@ def main(argv=None):
     ap.add_argument("--n-calib", type=int, default=300)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--batch-size", type=int, default=16)
+    ap.add_argument("--device", default="cuda",
+                    help="'cuda' (single GPU), 'auto' (shard across visible GPUs, e.g. a 31B), or 'cpu'")
     ap.add_argument("--plain-forward", dest="use_loop", action="store_false", default=True,
                     help="one full forward with output_hidden_states instead of the block loop (no logit lens)")
     args = ap.parse_args(argv)
@@ -50,7 +59,7 @@ def main(argv=None):
     def backend_factory():
         if "backend" not in holder:
             from anyjev.backends.hf import HFBackend
-            holder["backend"] = HFBackend(args.model, batch_size=args.batch_size)
+            holder["backend"] = HFBackend(args.model, device=args.device, batch_size=args.batch_size)
         return holder["backend"]
 
     records = typed_records(args.calib_cases)

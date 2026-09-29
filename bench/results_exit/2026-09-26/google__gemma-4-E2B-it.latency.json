@@ -1,0 +1,140 @@
+{
+ "model": "google/gemma-4-E2B-it",
+ "n_layers": 35,
+ "params_per_block": 36184064,
+ "hidden_size": 1536,
+ "rows": [
+  {
+   "state_tokens": 110,
+   "prompt_tokens": 213,
+   "depth": 1.0,
+   "blocks": 35,
+   "mode": "raw (plain forward)",
+   "batch_ms": 14.524908445309848,
+   "single_ms": 51.591661013662815,
+   "gflops": 539.50439424
+  },
+  {
+   "state_tokens": 110,
+   "prompt_tokens": 213,
+   "depth": 0.33,
+   "blocks": 12,
+   "mode": "truncated forward (head at this depth)",
+   "batch_ms": 4.727195802843198,
+   "single_ms": 20.236516681810222,
+   "gflops": 184.972935168
+  },
+  {
+   "state_tokens": 110,
+   "prompt_tokens": 213,
+   "depth": 0.5,
+   "blocks": 18,
+   "mode": "truncated forward (head at this depth)",
+   "batch_ms": 6.842924107331783,
+   "single_ms": 28.007489877442513,
+   "gflops": 277.459402752
+  },
+  {
+   "state_tokens": 110,
+   "prompt_tokens": 213,
+   "depth": 0.6,
+   "blocks": 21,
+   "mode": "truncated forward (head at this depth)",
+   "batch_ms": 8.251965569797903,
+   "single_ms": 46.975951393445335,
+   "gflops": 323.702636544
+  },
+  {
+   "state_tokens": 110,
+   "prompt_tokens": 213,
+   "depth": 0.75,
+   "blocks": 26,
+   "mode": "truncated forward (head at this depth)",
+   "batch_ms": 10.35797013901174,
+   "single_ms": 36.129239263633885,
+   "gflops": 400.774692864
+  },
+  {
+   "state_tokens": 110,
+   "prompt_tokens": 213,
+   "depth": 1.0,
+   "blocks": 35,
+   "mode": "truncated forward (head at this depth)",
+   "batch_ms": 14.38478718046099,
+   "single_ms": 58.45506278177102,
+   "gflops": 539.50439424
+  },
+  {
+   "state_tokens": 1000,
+   "prompt_tokens": 1097,
+   "depth": 1.0,
+   "blocks": 35,
+   "mode": "raw (plain forward)",
+   "batch_ms": 81.47434808779508,
+   "single_ms": 96.30614593625069,
+   "gflops": 2778.57427456
+  },
+  {
+   "state_tokens": 1000,
+   "prompt_tokens": 1097,
+   "depth": 0.33,
+   "blocks": 12,
+   "mode": "truncated forward (head at this depth)",
+   "batch_ms": 26.1775556136854,
+   "single_ms": 32.42194664975008,
+   "gflops": 952.654036992
+  },
+  {
+   "state_tokens": 1000,
+   "prompt_tokens": 1097,
+   "depth": 0.5,
+   "blocks": 18,
+   "mode": "truncated forward (head at this depth)",
+   "batch_ms": 39.09553398261778,
+   "single_ms": 46.87596367051204,
+   "gflops": 1428.981055488
+  },
+  {
+   "state_tokens": 1000,
+   "prompt_tokens": 1097,
+   "depth": 0.6,
+   "blocks": 21,
+   "mode": "truncated forward (head at this depth)",
+   "batch_ms": 46.888606128050014,
+   "single_ms": 55.3353604550163,
+   "gflops": 1667.144564736
+  },
+  {
+   "state_tokens": 1000,
+   "prompt_tokens": 1097,
+   "depth": 0.75,
+   "blocks": 26,
+   "mode": "truncated forward (head at this depth)",
+   "batch_ms": 58.9670640474651,
+   "single_ms": 68.95428616553545,
+   "gflops": 2064.083746816
+  },
+  {
+   "state_tokens": 1000,
+   "prompt_tokens": 1097,
+   "depth": 1.0,
+   "blocks": 35,
+   "mode": "truncated forward (head at this depth)",
+   "batch_ms": 81.21836627833545,
+   "single_ms": 93.83947265644868,
+   "gflops": 2778.57427456
+  }
+ ],
+ "date": "2026-09-26T00:20:01.965846",
+ "env": {
+  "python": "3.11.0rc1",
+  "date": "2026-09-26T00:20:01.965904",
+  "anyjev": "0.1.0",
+  "batch_size": 32,
+  "git_commit": "93bc4a3",
+  "torch": "2.6.0+cu124",
+  "transformers": "5.17.0",
+  "gpu": "NVIDIA RTX A6000",
+  "nvidia_smi": "NVIDIA RTX A6000, 570.207\nNVIDIA RTX A6000, 570.207\nNVIDIA RTX A6000, 570.207\nNVIDIA RTX A6000, 570.207"
+ }
+}
